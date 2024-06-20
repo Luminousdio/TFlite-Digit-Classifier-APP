@@ -20,12 +20,11 @@ class DigitClassifier(private val context: Context) {
     var isInitialized = false
         private set
 
-    /** Executor to run inference task in the background. */
     private val executorService: ExecutorService = Executors.newCachedThreadPool()
 
-    private var inputImageWidth: Int = 0 // will be inferred from TF Lite model.
-    private var inputImageHeight: Int = 0 // will be inferred from TF Lite model.
-    private var modelInputSize: Int = 0 // will be inferred from TF Lite model.
+    private var inputImageWidth: Int = 0
+    private var inputImageHeight: Int = 0
+    private var modelInputSize: Int = 0
 
     fun initialize(): Task<Void?> {
         val task = TaskCompletionSource<Void?>()
@@ -42,19 +41,16 @@ class DigitClassifier(private val context: Context) {
 
     @Throws(IOException::class)
     private fun initializeInterpreter() {
-        // Load the TF Lite model from asset folder and initialize TF Lite Interpreter with NNAPI enabled.
         val assetManager = context.assets
         val model = loadModelFile(assetManager, "mnist.tflite")
         val interpreter = Interpreter(model)
 
-        // Read input shape from model file.
         val inputShape = interpreter.getInputTensor(0).shape()
         inputImageWidth = inputShape[1]
         inputImageHeight = inputShape[2]
         modelInputSize = FLOAT_TYPE_SIZE * inputImageWidth *
                 inputImageHeight * PIXEL_SIZE
 
-        // Finish interpreter initialization.
         this.interpreter = interpreter
 
         isInitialized = true
@@ -68,13 +64,15 @@ class DigitClassifier(private val context: Context) {
         val fileChannel = inputStream.channel
         val startOffset = fileDescriptor.startOffset
         val declaredLength = fileDescriptor.declaredLength
-        return fileChannel.map(FileChannel.MapMode.READ_ONLY, startOffset, declaredLength)
+        return fileChannel.map(FileChannel.MapMode.READ_ONLY, startOffset, declaredLength).apply {
+            fileChannel.close()
+            inputStream.close()
+        }
     }
 
     private fun classify(bitmap: Bitmap): String {
         check(isInitialized) { "TF Lite Interpreter is not initialized yet." }
 
-        // Pre-processing: resize the input image to match the model input shape.
         val resizedImage = Bitmap.createScaledBitmap(
             bitmap,
             inputImageWidth,
@@ -83,14 +81,10 @@ class DigitClassifier(private val context: Context) {
         )
         val byteBuffer = convertBitmapToByteBuffer(resizedImage)
 
-        // Define an array to store the model output.
         val output = Array(1) { FloatArray(OUTPUT_CLASSES_COUNT) }
 
-        // Run inference with the input data.
         interpreter?.run(byteBuffer, output)
 
-        // Post-processing: find the digit that has the highest probability
-        // and return it in a human-readable string.
         val result = softmax(output[0])
         val maxIndex = result.indices.maxByOrNull { result[it] } ?: -1
 
@@ -108,8 +102,12 @@ class DigitClassifier(private val context: Context) {
     fun classifyAsync(bitmap: Bitmap): Task<String> {
         val task = TaskCompletionSource<String>()
         executorService.execute {
-            val result = classify(bitmap)
-            task.setResult(result)
+            try {
+                val result = classify(bitmap)
+                task.setResult(result)
+            } catch (e: Exception) {
+                task.setException(e)
+            }
         }
         return task.task
     }
@@ -119,6 +117,7 @@ class DigitClassifier(private val context: Context) {
             interpreter?.close()
             Log.d(TAG, "Closed TFLite interpreter.")
         }
+        executorService.shutdown()
     }
 
     private fun convertBitmapToByteBuffer(bitmap: Bitmap): ByteBuffer {
@@ -133,7 +132,6 @@ class DigitClassifier(private val context: Context) {
             val g = (pixelValue shr 8 and 0xFF)
             val b = (pixelValue and 0xFF)
 
-            // Convert RGB to grayscale and normalize pixel value to [0..1].
             val normalizedPixelValue = (r + g + b) / 3.0f / 255.0f
             byteBuffer.putFloat(normalizedPixelValue)
         }
